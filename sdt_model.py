@@ -212,6 +212,7 @@ class Transformer_Based_Model(nn.Module):
         super(Transformer_Based_Model, self).__init__()
 
         self.temp = temp
+        self.hidden_dim = hidden_dim
         self.n_classes = n_classes
         self.n_speakers = n_speakers
         if self.n_speakers == 2:
@@ -329,24 +330,24 @@ class Transformer_Based_Model(nn.Module):
         return all_transformer_out
         
         # # Emotion Classifier
-        # t_final_out = self.t_output_layer(t_transformer_out)
-        # a_final_out = self.a_output_layer(a_transformer_out)
-        # v_final_out = self.v_output_layer(v_transformer_out)
-        # all_final_out = self.all_output_layer(all_transformer_out)
+        t_final_out = self.t_output_layer(t_transformer_out)
+        a_final_out = self.a_output_layer(a_transformer_out)
+        v_final_out = self.v_output_layer(v_transformer_out)
+        all_final_out = self.all_output_layer(all_transformer_out)
 
-        # t_log_prob = F.log_softmax(t_final_out, 2)
-        # a_log_prob = F.log_softmax(a_final_out, 2)
-        # v_log_prob = F.log_softmax(v_final_out, 2)
+        t_log_prob = F.log_softmax(t_final_out, 2)
+        a_log_prob = F.log_softmax(a_final_out, 2)
+        v_log_prob = F.log_softmax(v_final_out, 2)
 
-        # all_log_prob = F.log_softmax(all_final_out, 2)
-        # all_prob = F.softmax(all_final_out, 2)
+        all_log_prob = F.log_softmax(all_final_out, 2)
+        all_prob = F.softmax(all_final_out, 2)
 
-        # kl_t_log_prob = F.log_softmax(t_final_out /self.temp, 2)
-        # kl_a_log_prob = F.log_softmax(a_final_out /self.temp, 2)
-        # kl_v_log_prob = F.log_softmax(v_final_out /self.temp, 2)
+        kl_t_log_prob = F.log_softmax(t_final_out /self.temp, 2)
+        kl_a_log_prob = F.log_softmax(a_final_out /self.temp, 2)
+        kl_v_log_prob = F.log_softmax(v_final_out /self.temp, 2)
 
-        # kl_all_prob = F.softmax(all_final_out /self.temp, 2)
+        kl_all_prob = F.softmax(all_final_out /self.temp, 2)
 
-        # return t_log_prob, a_log_prob, v_log_prob, all_log_prob, all_prob, \
-        #        kl_t_log_prob, kl_a_log_prob, kl_v_log_prob, kl_all_prob
+        return t_log_prob, a_log_prob, v_log_prob, all_log_prob, all_prob, \
+               kl_t_log_prob, kl_a_log_prob, kl_v_log_prob, kl_all_prob
 
