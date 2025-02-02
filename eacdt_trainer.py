@@ -19,6 +19,9 @@ import logging
 import os
 import argparse
 
+import warnings
+warnings.filterwarnings("ignore")
+
 def get_logger(filename, verbosity=1, name=None):
     level_dict = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING}
     formatter = logging.Formatter(
@@ -65,13 +68,13 @@ def get_parser():
 
     parser.add_argument('--dropout', type=float, default=0.1, metavar='dropout', help='dropout rate')
 
-    parser.add_argument('--batch_size', type=int, default=32, metavar='BS', help='batch size')
+    parser.add_argument('--batch_size', type=int, default=16, metavar='BS', help='batch size') # 32
 
     parser.add_argument('--epochs', type=int, default=8, metavar='E', help='number of epochs')
 
     parser.add_argument('--weight_decay', type=float, default=0, help='type of nodal attention')
     ### Environment params
-    parser.add_argument("--fp16", type=bool, default=True)
+    parser.add_argument("--fp16", type=bool, default=False)
     parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--ignore_prompt_prefix", action="store_true", default=True)
     parser.add_argument("--disable_training_progress_bar", action="store_true")
@@ -169,12 +172,12 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
             with torch.autocast(device_type="cuda" if args.cuda else "cpu"):
                 loss, loss_output, log_prob, label_, mask, anchor_scores = _forward(
                     model, loss_function, textf, visuf, acouf,
-                    qmask, umask, lengths, label, device
+                    umask, qmask, lengths, label, device
                 )
         else:
             loss, loss_output, log_prob, label_, mask, anchor_scores = _forward(
                 model, loss_function, textf, visuf, acouf,
-                qmask, umask, lengths, label, device
+                umask, qmask, lengths, label, device
             )
 
         if args.use_nearest_neighbour:
@@ -198,7 +201,7 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
             sentiment_labels.append(loss_output.sentiment_labels)
 
     if len(preds) == 0:
-        return float('nan'), float('nan'), [], [], float('nan'), [], [], [], [], []
+        return float('nan'), float('nan'), [], [], float('nan'), [], [] #, [], [], []
 
     new_preds, new_labels = [], []
     for i, label_tensor in enumerate(labels):
@@ -239,19 +242,19 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
     return avg_loss, avg_accuracy, labels, preds, avg_fscore, f1_scores, max_cosine
 
 
-def _forward(model, loss_function, textf, visuf, acouf, qmask, umask, lengths, label, device):
+def _forward(model, loss_function, textf, visuf, acouf, umask, qmask, lengths, label, device):
 
-    mask = (label != -1)
+    mask = umask.to(bool) # (label != -1)
 
     if model.training:
         log_prob, masked_mapped_output, _, anchor_scores = model(
-            textf, visuf, acouf, qmask, umask, lengths, return_mask_output=True
+            textf, visuf, acouf, umask, qmask, lengths, return_mask_output=True
         )
         loss_output = loss_function(log_prob, masked_mapped_output, label, mask, model)
     else:
         with torch.no_grad():
             log_prob, masked_mapped_output, _, anchor_scores = model(
-                textf, visuf, acouf, qmask, umask, lengths, return_mask_output=True
+                textf, visuf, acouf, umask, qmask, lengths, return_mask_output=True
             )
             loss_output = loss_function(log_prob, masked_mapped_output, label, mask, model)
 
@@ -268,7 +271,7 @@ def main():
     sdt_model = init_sdt()
     eacl_model = init_eacl_with_sdt(args, sdt_model, 7)
 
-    loss_function = MaskedNLLLoss()
+    loss_function = eacl_loss_function # MaskedNLLLoss()
     train_loader, valid_loader, test_loader = get_MELD_loaders(valid=0.0,
                                                                batch_size=args.batch_size,
                                                                num_workers=0)
@@ -299,6 +302,7 @@ def main():
         train_loss, train_acc, _, _, train_fscore, train_detail_f1, max_cosine = \
             train_or_eval_model(eacl_model, loss_function, train_loader, e, device, args, optimizer, lr_scheduler, True)
         lr_scheduler.step()
+        # return avg_loss, avg_accuracy, labels, preds, avg_fscore, f1_scores, max_cosine
         valid_loss, valid_acc, _, _, valid_fscore, valid_detail_f1, _ = \
             train_or_eval_model(eacl_model, loss_function, valid_loader, e, device, args)
         test_loss, test_acc, test_label, test_pred, test_fscore, test_detail_f1, _ = \

@@ -52,26 +52,26 @@ class CLModel(nn.Module):
     def _forward(self, textf, visuf, acouf, umask, qmask, lengths):
 
         sdt_outputs = self.f_context_encoder(textf, visuf, acouf, umask, qmask, lengths)
-        mask_outputs_list = []
-        for i, seq_len in enumerate(lengths):
-            mask_outputs_list.append(sdt_outputs[i, seq_len - 1, :].unsqueeze(0))
-        mask_outputs = torch.cat(mask_outputs_list, dim=0)
-        mask_mapped_outputs = self.map_function(mask_outputs)
+        # mask_outputs_list = []
+        # for i, seq_len in enumerate(lengths):
+        #     mask_outputs_list.append(sdt_outputs[i, seq_len-1, :].unsqueeze(0))
+        # mask_outputs = torch.cat(mask_outputs_list, dim=0)
+        mask_mapped_outputs = self.map_function(sdt_outputs)
 
-        feature = torch.dropout(mask_outputs, self.dropout, train=self.training)
+        feature = torch.dropout(sdt_outputs, self.dropout, train=self.training)
         feature = self.predictor(feature)
 
         if self.args.use_nearest_neighbour:
             anchors = self.map_function(self.emo_anchor)
             self.last_emo_anchor = anchors
             anchor_scores = self.score_func(
-                mask_mapped_outputs.unsqueeze(1),
-                anchors.unsqueeze(0)
+                mask_mapped_outputs.unsqueeze(2),
+                anchors.unsqueeze(0).unsqueeze(0)
             )
         else:
             anchor_scores = None
 
-        return feature, mask_mapped_outputs, mask_outputs, anchor_scores
+        return feature, mask_mapped_outputs, sdt_outputs, anchor_scores
 
     def forward(self, textf, visuf, acouf, qmask, umask, lengths, return_mask_output=False):
         feature, mask_mapped_outputs, mask_outputs, anchor_scores = self._forward(

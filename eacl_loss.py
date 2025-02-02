@@ -76,6 +76,9 @@ class SupConLoss(nn.Module):
         return (1 + F.cosine_similarity(x, y, dim=-1)) / 2 + self.eps
 
     def forward(self, reps, labels, model, return_representations=False):
+        labels = labels.view(labels.shape[0]*labels.shape[1]) ## added
+        reps = reps.view(reps.shape[0]*reps.shape[1], -1) ## added
+        # self.emo_label = self.emo_label.view(-1, 1) ## added
         device = reps.device
         batch_size = reps.shape[0]
         self.emo_anchor = self.emo_anchor.to(device)
