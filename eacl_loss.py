@@ -1,4 +1,4 @@
-from config import *
+# from config import *
 from sklearn.metrics.pairwise import cosine_similarity
 from dataclasses import dataclass
 import torch

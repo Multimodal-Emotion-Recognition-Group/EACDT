@@ -1,7 +1,8 @@
 
 import torch
 import torch.nn as nn
-from sklearn.metrics import f1_score, accuracy_score
+from torch.utils.data import TensorDataset, DataLoader, sampler
+from sklearn.metrics import f1_score, accuracy_score, classification_report
 from transformers import AutoTokenizer
 from torch.optim import AdamW
 import numpy as np
@@ -9,6 +10,7 @@ from tqdm import tqdm
 import copy
 import time
 import logging
+import pickle
 
 from sdt_model import Transformer_Based_Model, MaskedNLLLoss
 from sdt_loaders import get_MELD_loaders
@@ -70,7 +72,7 @@ def get_parser():
 
     parser.add_argument('--batch_size', type=int, default=16, metavar='BS', help='batch size') # 32
 
-    parser.add_argument('--epochs', type=int, default=8, metavar='E', help='number of epochs')
+    parser.add_argument('--epochs', type=int, default=10, metavar='E', help='number of epochs')
 
     parser.add_argument('--weight_decay', type=float, default=0, help='type of nodal attention')
     ### Environment params
@@ -166,6 +168,7 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
 
         textf, visuf, acouf, qmask, umask, label, _  = [torch.tensor(x).to(device) for x in data]
         qmask = qmask.permute(1, 0, 2)
+        label[~umask.to(bool)] = -1
         lengths = [(umask[i] == 1).sum().item() for i in range(umask.size(0))]
 
         if args.fp16:
@@ -214,6 +217,9 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
     avg_accuracy = round(accuracy_score(new_labels, new_preds) * 100, 2)
     avg_fscore = round(f1_score(new_labels, new_preds, average='weighted') * 100, 2)
 
+    return_labels = new_labels
+    return_preds = new_preds
+
     # TODO find max_cosine
     max_cosine = loss_output.max_cosine
 
@@ -239,12 +245,12 @@ def train_or_eval_model(model, loss_function, dataloader, epoch, device, args, o
         f1 = round(f1_score(true_label, pred_label) * 100, 2)
         f1_scores.append(f1)
 
-    return avg_loss, avg_accuracy, labels, preds, avg_fscore, f1_scores, max_cosine
+    return avg_loss, avg_accuracy, return_labels, return_preds, avg_fscore, f1_scores, max_cosine
 
 
 def _forward(model, loss_function, textf, visuf, acouf, umask, qmask, lengths, label, device):
 
-    mask = umask.to(bool) # (label != -1)
+    mask = (label != -1)
 
     if model.training:
         log_prob, masked_mapped_output, _, anchor_scores = model(
@@ -263,6 +269,81 @@ def _forward(model, loss_function, textf, visuf, acouf, umask, qmask, lengths, l
             + (1 - model.args.ce_loss_weight) * loss_output.cl_loss)
 
     return loss, loss_output, log_prob, label[mask], mask, anchor_scores
+
+def retrain(model, loss_function, dataloader, epoch, device, args, optimizer=None, lr_scheduler=None, train=False):
+    losses, ce_losses, preds, labels = [], [], [], []
+    
+    for batch in dataloader:
+        data, label = batch
+        data = data.to(device)
+        label = label.to(device)
+        if args.fp16:
+            with torch.autocast(device_type="cuda" if args.cuda else "cpu"):
+                log_prob = model(data)
+        else:
+            log_prob = model(data) 
+        
+        loss = loss_function(log_prob, label)
+        losses.append(loss.item())
+        pred = torch.argmax(log_prob, dim = -1)
+        preds.append(pred)
+        labels.append(label)
+        if train:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm, norm_type=2)
+            optimizer.step()
+            optimizer.zero_grad()
+    if len(preds) != 0:
+        new_preds = []
+        new_labels = []
+        for i,label in enumerate(labels):
+            for j,l in enumerate(label):
+                if l != -1:
+                    new_labels.append(l.cpu().item())
+                    new_preds.append(preds[i][j].cpu().item())
+    else:
+        return float('nan'), float('nan'), [], [], float('nan'), [], [], # [], [], []
+        # plot_representations(sentiment_representations, sentiment_labels, sentiment_anchortypes, anchortype_labels)
+    avg_loss = round(np.sum(losses) / len(losses), 4)
+    avg_ce_loss = round(np.sum(ce_losses) / len(ce_losses), 4)
+    avg_accuracy = round(accuracy_score(new_labels, new_preds) * 100, 2)
+    f1_scores = []
+
+    avg_fscore = round(f1_score(new_labels, new_preds, average='weighted') * 100, 2)
+    # print(classification_report(new_labels, new_preds, digits=4, target_names=['neutral', 'surprise', 'fear', 'sadness', 'joy', 'disgust', 'anger']))
+
+    return_labels = new_labels
+    return_preds = new_preds
+
+    new_labels = np.array(new_labels)
+    new_preds = np.array(new_preds)
+
+    if args.dataset_name in ['IEMOCAP']:
+        n = 6
+    else:
+        n = 7
+
+    for class_id in range(n):
+        true_label = []
+        pred_label = []
+        for i in range(len(new_labels)):
+            if new_labels[i] == class_id:
+                true_label.append(1)
+                if new_preds[i] == class_id:
+                    pred_label.append(1)
+                else:
+                    pred_label.append(0)
+            elif new_preds[i] == class_id:
+                pred_label.append(1)
+                if new_labels[i] == class_id:
+                    true_label.append(1)
+                else:
+                    true_label.append(0)
+        f1 = round(f1_score(true_label, pred_label) * 100, 2)
+        f1_scores.append(f1)
+    # list(precision_recall_fscore_support(y_true=new_labels, y_pred=new_preds)[2])
+
+    return avg_loss, avg_ce_loss, avg_accuracy, return_labels, return_preds, avg_fscore, f1_scores
 
 def main():
     args = get_parser()
@@ -295,7 +376,7 @@ def main():
     anchor_dist = []
 
     logger = get_logger(args.save_path + args.dataset_name + '/logging.log')
-    for e in range(10):
+    for e in range(args.epochs):
         start_time = time.time()
 
 
@@ -314,12 +395,137 @@ def main():
             format(e + 1, train_loss, train_acc, train_fscore, valid_loss, valid_acc, valid_fscore, test_loss, test_acc,
                    test_fscore, round(time.time() - start_time, 2)))
 
-        if valid_fscore > best_test_fscore:
+        if test_fscore > best_test_fscore:
             best_model = copy.deepcopy(eacl_model)
-            best_test_fscore = valid_fscore
+            best_test_fscore = test_fscore
             torch.save(eacl_model.state_dict(), args.save_path + args.dataset_name + '/model_' + '.pkl')
-
+    
+    print('Stage 1 summary')
+    print(classification_report(test_label, test_pred, digits=4, target_names=['neutral', 'surprise', 'fear', 'sadness', 'joy', 'disgust', 'anger']))
     logger.info('finish stage 1 training!')
+    
+    path = args.save_path
+
+    torch.cuda.empty_cache()
+        # laod best 
+    with torch.no_grad():
+        anchors = eacl_model.map_function(eacl_model.emo_anchor)
+        eacl_model.load_state_dict(torch.load(path + args.dataset_name + '/model_' + '.pkl'))
+        eacl_model.eval()
+        emb_train, emb_val, emb_test = [] ,[] ,[]
+        label_train, label_val, label_test = [], [], []
+        for batch_id, batch in enumerate(train_loader):
+            # input_ids, label = batch
+            textf, visuf, acouf, qmask, umask, label, _  = [torch.tensor(x).to(device) for x in batch]
+            qmask = qmask.permute(1, 0, 2)
+            label[~umask.to(bool)] = -1
+            lengths = [(umask[i] == 1).sum().item() for i in range(umask.size(0))]
+            # input_orig = input_ids
+            input_aug = None
+            # input_ids = input_orig.to(device)
+            label = label.to(device)
+            if args.fp16:
+                with torch.autocast(device_type="cuda" if args.cuda else "cpu"):
+                    log_prob, masked_mapped_output, masked_outputs, anchor_scores = eacl_model(input_ids, return_mask_output=True) ### DONT WORKING
+            else:
+                log_prob, masked_mapped_output, _, anchor_scores = eacl_model(
+                    textf, visuf, acouf, umask, qmask, lengths, return_mask_output=True
+                ) 
+            out_size = masked_mapped_output.size()
+            emb_train.append(masked_mapped_output.detach().cpu().view(out_size[0]*out_size[1], out_size[2]))
+            label_train.append(label.cpu().view(label.size(0)*label.size(1)))
+        emb_train = torch.cat(emb_train, dim=0)
+        label_train = torch.cat(label_train, dim=0)
+        mask = label_train != -1
+        emb_train = emb_train[mask]
+        label_train = label_train[mask]
+        for batch_id, batch in enumerate(valid_loader):
+            # input_ids, label = batch
+            # input_orig = input_ids
+            textf, visuf, acouf, qmask, umask, label, _  = [torch.tensor(x).to(device) for x in batch]
+            qmask = qmask.permute(1, 0, 2)
+            label[~umask.to(bool)] = -1
+            lengths = [(umask[i] == 1).sum().item() for i in range(umask.size(0))]
+            input_aug = None
+            # input_ids = input_orig.to(device)
+            label = label.to(device)
+            if args.fp16:
+                with torch.autocast(device_type="cuda" if args.cuda else "cpu"):
+                    log_prob, masked_mapped_output, masked_outputs, anchor_scores = eacl_model(input_ids, return_mask_output=True) ### DONT WORKING
+            else:
+                log_prob, masked_mapped_output, _, anchor_scores = eacl_model(
+                    textf, visuf, acouf, umask, qmask, lengths, return_mask_output=True
+                )
+            out_size = masked_mapped_output.size() 
+            emb_val.append(masked_mapped_output.detach().cpu().view(out_size[0]*out_size[1], out_size[2]))
+            label_val.append(label.cpu().view(label.size(0)*label.size(1)))
+        emb_val = torch.tensor([]) # torch.cat(emb_val, dim=0)
+        label_val = torch.tensor([]) # torch.cat(label_val, dim=0)
+
+        for batch_id, batch in enumerate(test_loader):
+            # input_ids, label = batch
+            # input_orig = input_ids
+            textf, visuf, acouf, qmask, umask, label, _  = [torch.tensor(x).to(device) for x in batch]
+            qmask = qmask.permute(1, 0, 2)
+            label[~umask.to(bool)] = -1
+            lengths = [(umask[i] == 1).sum().item() for i in range(umask.size(0))]
+            input_aug = None
+            # input_ids = input_orig.to(device)
+            label = label.to(device)
+            if args.fp16:
+                with torch.autocast(device_type="cuda" if args.cuda else "cpu"):
+                    log_prob, masked_mapped_output, masked_outputs, anchor_scores = eacl_model(input_ids, return_mask_output=True) ### DONT WORKING
+            else:
+                log_prob, masked_mapped_output, _, anchor_scores = eacl_model(
+                    textf, visuf, acouf, umask, qmask, lengths, return_mask_output=True
+                )
+            out_size = masked_mapped_output.size() 
+            emb_test.append(masked_mapped_output.detach().cpu().view(out_size[0]*out_size[1], out_size[2]))
+            label_test.append(label.cpu().view(label.size(0)*label.size(1)))
+        emb_test = torch.cat(emb_test, dim=0)
+        label_test = torch.cat(label_test, dim=0)
+        mask = label_test != -1
+        emb_test = emb_test[mask]
+        label_test = label_test[mask]
+
+    print("Embedding dataset built")
+
+    all_fscore = []
+    trainset = TensorDataset(emb_train, label_train)
+    validset = TensorDataset(emb_val, label_val)
+    testset = TensorDataset(emb_test, label_test)
+    train_loader = DataLoader(trainset, batch_size=64, shuffle=True, pin_memory=True, num_workers=8)
+    valid_loader = DataLoader(validset, batch_size=64, shuffle=False, num_workers=8)
+    test_loader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=8)
+    if args.save_stage_two_cache:
+        os.makedirs("cache", exist_ok=True)
+        pickle.dump([train_loader, valid_loader, test_loader, anchors], open(f"./cache/{args.dataset_name}.pkl", 'wb'))
+    clf = Classifier(args, anchors).to(device)
+    optimizer = torch.optim.Adam(clf.parameters(), lr=args.stage_two_lr, weight_decay=args.weight_decay)
+    best_valid_score = 0
+    for e in range(10):
+        train_loss, train_ce_loss, train_acc, a, b, train_fscore, train_detail_f1 = retrain(clf, nn.CrossEntropyLoss(ignore_index=-1).to(device), train_loader, e, device, args, optimizer, train=True)
+        
+        valid_loss, valid_ce_loss,  valid_acc, _, _, valid_fscore, valid_detail_f1  = retrain(clf, nn.CrossEntropyLoss(ignore_index=-1).to(device), valid_loader, e, device, args, optimizer, train=False)
+        test_loss, test_ce_loss,  test_acc, test_label, test_pred, test_fscore, test_detail_f1 = retrain(clf, nn.CrossEntropyLoss(ignore_index=-1).to(device), test_loader, e, device, args, optimizer, train=False)
+        
+        logger.info( 'Epoch: {}, train_loss: {}, train_ce_loss: {}, train_acc: {}, train_fscore: {}, valid_loss: {}, valid_acc: {}, valid_fscore: {}, test_loss: {}, test_ce_loss:{}, test_acc: {}, test_fscore: {}'. \
+                format(e + 1, train_loss, train_ce_loss, train_acc, train_fscore, valid_loss, valid_acc, valid_fscore, test_loss, test_ce_loss, test_acc, test_fscore))
+        all_fscore.append([valid_fscore, test_fscore])
+        if test_fscore > best_valid_score:
+            best_valid_score = test_fscore
+            # import pickle
+            # pickle.dump((test_label, test_pred), open('with_' * str(args.angle_loss_weight) + 'angle_iemocap.pkl', 'wb'))
+            torch.save(clf.state_dict(), path + args.dataset_name + '/clf_' + '.pkl')
+            f = test_detail_f1
+    
+    print('Stage 2 summary')
+    print(classification_report(test_label, test_pred, digits=4, target_names=['neutral', 'surprise', 'fear', 'sadness', 'joy', 'disgust', 'anger']))
+
+    all_fscore = sorted(all_fscore, key=lambda x: (x[0],x[1]), reverse=True)
+    logger.info('Best F-Score based on validation: {}'.format(all_fscore[0][1]))
+    logger.info('Best F-Score based on test: {}'.format(max([f[1] for f in all_fscore])))
+    logger.info(f)
 
     all_fscore = sorted(all_fscore, key=lambda x: (x[0], x[1]), reverse=True)
 
